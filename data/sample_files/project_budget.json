@@ -1,0 +1,19 @@
+{
+  "project": "Education For All — Bangladesh",
+  "project_id": "PROJ-2024-BD-007",
+  "fiscal_year": 2024,
+  "total_budget_usd": 285000,
+  "currency": "USD",
+  "approved_date": "2024-01-01",
+  "approved_by": "Finance Director",
+  "allocations": [
+    {"category": "Staff Salaries", "allocated": 120000, "spent": 38500, "notes": "Q1 disbursement"},
+    {"category": "Training & Capacity Building", "allocated": 45000, "spent": 12000},
+    {"category": "Materials & Supplies", "allocated": 35000, "spent": 8750},
+    {"category": "Community Outreach", "allocated": 25000, "spent": 4200},
+    {"category": "Monitoring & Evaluation", "allocated": 30000, "spent": 6100},
+    {"category": "Admin & Overhead", "allocated": 30000, "spent": 7200}
+  ],
+  "total_spent": 76750,
+  "utilisation_rate_pct": 26.9
+}

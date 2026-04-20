@@ -1,0 +1,45 @@
+{
+  "program": "Water & Sanitation",
+  "country": "Kenya",
+  "reporting_period": "Q1 2024",
+  "total_beneficiaries": 3420,
+  "beneficiaries": [
+    {
+      "id": "B001",
+      "household_id": "HH-2024-001",
+      "county": "Turkana",
+      "village": "Lodwar",
+      "household_size": 6,
+      "water_access_before": false,
+      "water_access_after": true,
+      "sanitation_facility": "improved_latrine",
+      "enrollment_date": "2024-01-15",
+      "primary_contact": "Akiru Lokiru"
+    },
+    {
+      "id": "B002",
+      "household_id": "HH-2024-002",
+      "county": "Marsabit",
+      "village": "Moyale",
+      "household_size": 4,
+      "water_access_before": false,
+      "water_access_after": true,
+      "sanitation_facility": "improved_latrine",
+      "enrollment_date": "2024-01-18",
+      "primary_contact": "Hawa Galgalo"
+    },
+    {
+      "id": "B003",
+      "household_id": "HH-2024-003",
+      "county": "Garissa",
+      "village": "Dadaab",
+      "household_size": 8,
+      "water_access_before": false,
+      "water_access_after": false,
+      "sanitation_facility": "open_defecation",
+      "enrollment_date": "2024-02-01",
+      "primary_contact": "Fatuma Ali",
+      "notes": "Follow-up required — latrines not yet constructed"
+    }
+  ]
+}

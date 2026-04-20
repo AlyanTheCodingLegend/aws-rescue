@@ -1,0 +1,9 @@
+donor_id,name,email,country,donation_amount,currency,date,recurring
+D001,Alice Mwangi,alice.mwangi@example.com,Kenya,250.00,USD,2024-03-15,True
+D002,Rafael Gomez,rafael.gomez@example.org,Colombia,500.00,USD,2024-02-20,False
+D003,Priya Sharma,priya.sharma@example.net,Bangladesh,150.00,GBP,2024-04-01,True
+D004,Johan Van Der Berg,j.vanderberg@example.com,Netherlands,1000.00,EUR,2024-01-10,True
+D005,Amina Hassan,amina.hassan@example.org,Uganda,75.00,USD,2024-03-28,False
+D006,Li Wei,li.wei@example.cn,Kenya,300.00,USD,2024-02-14,True
+D007,Sarah Thompson,s.thompson@example.co.uk,Ethiopia,200.00,GBP,2024-03-05,False
+D008,Marcos Andrade,marcos@example.br,Bolivia,450.00,USD,2024-01-22,True
