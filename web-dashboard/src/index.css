@@ -1,0 +1,52 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&family=Sora:wght@400;500;600;700&display=swap');
+
+:root {
+  --font-sans: 'Sora', 'Segoe UI', sans-serif;
+  --font-display: 'Outfit', 'Segoe UI', sans-serif;
+
+  --ink: #1e293b;
+  --ink-strong: #0f172a;
+  --muted: #5f6f82;
+
+  --panel-bg: rgba(255, 255, 255, 0.9);
+  --panel-border: rgba(133, 159, 181, 0.36);
+  --panel-shadow: 0 16px 32px rgba(15, 23, 42, 0.13);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 9% 3%, rgba(45, 212, 191, 0.24), transparent 36%),
+    radial-gradient(circle at 92% 10%, rgba(251, 191, 36, 0.22), transparent 34%),
+    radial-gradient(circle at 70% 88%, rgba(56, 189, 248, 0.2), transparent 34%),
+    linear-gradient(145deg, #eef4f8 0%, #f6f2e9 54%, #edf2fb 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size: 36px 36px;
+  opacity: 0.38;
+  z-index: -1;
+}
