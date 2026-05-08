@@ -101,4 +101,23 @@ export const api = {
   seedData() {
     return request('/actions/seed', { method: 'POST' })
   },
+
+  async uploadFile(file, prefix = 'uploads') {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('prefix', prefix ?? '')
+
+    const response = await fetch(`${API_BASE}/actions/upload-file`, {
+      method: 'POST',
+      body: formData,
+    })
+
+    const body = await parseResponse(response)
+    if (!response.ok) {
+      const detail =
+        typeof body === 'object' && body?.detail ? body.detail : `Upload failed (${response.status})`
+      throw new Error(detail)
+    }
+    return body
+  },
 }

@@ -15,25 +15,34 @@ class Config:
     # These can be swapped by the failover command (rewrites this file)
     _primary_is_original: bool = True
 
+    # Runtime-only flag: temporarily promotes the backup region while a
+    # simulated outage is active. Never persisted to disk.
+    outage_active: bool = False
+
+    @property
+    def _effective_original(self) -> bool:
+        # XOR: outage flips the active roles on top of any persisted failover.
+        return self._primary_is_original ^ self.outage_active
+
     @property
     def primary_bucket(self) -> str:
-        if self._primary_is_original:
+        if self._effective_original:
             return f"rescue-primary-{self.project_id}"
         return f"rescue-backup-{self.project_id}"
 
     @property
     def backup_bucket(self) -> str:
-        if self._primary_is_original:
+        if self._effective_original:
             return f"rescue-backup-{self.project_id}"
         return f"rescue-primary-{self.project_id}"
 
     @property
     def active_primary_region(self) -> str:
-        return self.primary_region if self._primary_is_original else self.backup_region
+        return self.primary_region if self._effective_original else self.backup_region
 
     @property
     def active_backup_region(self) -> str:
-        return self.backup_region if self._primary_is_original else self.primary_region
+        return self.backup_region if self._effective_original else self.primary_region
 
     dynamo_table: str = "rescue-replication-log"
     dynamo_region: str = "us-east-1"

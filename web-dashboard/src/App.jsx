@@ -16,6 +16,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   TriangleAlert,
+  UploadCloud,
   XCircle,
 } from 'lucide-react'
 import {
@@ -113,6 +114,9 @@ function App() {
   const [outageMode, setOutageMode] = useState(false)
   const [runningActionKey, setRunningActionKey] = useState('')
   const [actionResult, setActionResult] = useState(null)
+  const [uploadFileChoice, setUploadFileChoice] = useState(null)
+  const [uploadingFile, setUploadingFile] = useState(false)
+  const [uploadInputKey, setUploadInputKey] = useState(0)
 
   function showToast(text, tone = 'neutral') {
     setToast({ id: Date.now(), text, tone })
@@ -367,6 +371,40 @@ function App() {
     }
   }
 
+  async function runUploadFile() {
+    if (!uploadFileChoice || uploadingFile) {
+      return
+    }
+
+    setUploadingFile(true)
+    setError('')
+
+    try {
+      const response = await api.uploadFile(uploadFileChoice)
+      const result = response?.result ?? response
+      const targetKey = result?.key || uploadFileChoice.name
+      const targetBucket = result?.bucket || ''
+      showToast(`Uploaded ${targetKey} to ${targetBucket}`, 'ok')
+      setActionResult({ action: 'upload-file', payload: result })
+      setUploadFileChoice(null)
+      setUploadInputKey((current) => current + 1)
+      await refreshAll()
+      // Replicator Lambda writes the DynamoDB log entry a beat after the
+      // S3 PUT returns, so the immediate refresh above can miss it. Re-pull
+      // logs + overview shortly after to capture the new row.
+      window.setTimeout(() => {
+        Promise.all([refreshLogs(), refreshOverview()]).catch((followError) => {
+          setError(followError.message || 'Follow-up refresh failed.')
+        })
+      }, 2500)
+    } catch (uploadError) {
+      setError(uploadError.message || 'Upload failed.')
+      showToast(uploadError.message || 'Upload failed.', 'warn')
+    } finally {
+      setUploadingFile(false)
+    }
+  }
+
   function exportVisibleLogs() {
     const url = api.getLogsCsvUrl({
       status: logFilter,
@@ -528,6 +566,11 @@ function App() {
             runningActionKey={runningActionKey}
             actionResult={actionResult}
             runControlAction={runControlAction}
+            uploadFileChoice={uploadFileChoice}
+            setUploadFileChoice={setUploadFileChoice}
+            uploadingFile={uploadingFile}
+            runUploadFile={runUploadFile}
+            uploadInputKey={uploadInputKey}
           />
         )}
       </main>
@@ -948,7 +991,18 @@ function LogsSection({
   )
 }
 
-function ControlsSection({ configData, outageMode, runningActionKey, actionResult, runControlAction }) {
+function ControlsSection({
+  configData,
+  outageMode,
+  runningActionKey,
+  actionResult,
+  runControlAction,
+  uploadFileChoice,
+  setUploadFileChoice,
+  uploadingFile,
+  runUploadFile,
+  uploadInputKey,
+}) {
   const actionCards = [
     {
       key: 'full-sync',
@@ -1005,6 +1059,47 @@ function ControlsSection({ configData, outageMode, runningActionKey, actionResul
             )
           })}
         </div>
+
+        <div className="card-head" style={{ marginTop: '18px' }}>
+          <h4>Upload Your Own File</h4>
+          <span>
+            Pick any document from your computer; it will be uploaded to the active primary bucket.
+            {outageMode ? ' (Outage active — file goes to the promoted backup region.)' : ''}
+          </span>
+        </div>
+
+        <article className="control-card upload-card">
+          <label className="field" htmlFor="uploadFileInput">
+            <span>File</span>
+            <input
+              key={uploadInputKey}
+              id="uploadFileInput"
+              type="file"
+              onChange={(event) => {
+                const next = event.target.files && event.target.files[0]
+                setUploadFileChoice(next || null)
+              }}
+              disabled={uploadingFile}
+            />
+          </label>
+
+          <p>
+            {uploadFileChoice
+              ? `Ready: ${uploadFileChoice.name} (${formatBytes(uploadFileChoice.size)})`
+              : 'No file selected yet.'}
+            {' '}
+            Target: <code>{configData?.primary_bucket || 'primary bucket'}</code>
+          </p>
+
+          <button
+            type="button"
+            onClick={runUploadFile}
+            disabled={!uploadFileChoice || uploadingFile || Boolean(runningActionKey)}
+          >
+            {uploadingFile ? <RefreshCw className="spin" size={15} /> : <UploadCloud size={15} />}
+            {uploadingFile ? 'Uploading...' : 'Upload File'}
+          </button>
+        </article>
       </div>
 
       <div className="panel" data-stagger="3">

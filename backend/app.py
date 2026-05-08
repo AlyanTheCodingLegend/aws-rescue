@@ -12,7 +12,7 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -37,8 +37,9 @@ app.add_middleware(
 _state_lock = threading.Lock()
 _runtime_state: dict[str, Any] = {
     "outage_active": False,
-    "saved_notification_config": {},
 }
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB hard cap on user uploads
 
 
 def _s3(region: str):
@@ -243,54 +244,63 @@ def _run_health_check() -> dict[str, Any]:
     }
 
 
-def _get_bucket_notification_config() -> dict[str, Any]:
-    s3 = _primary_s3()
-    resp = s3.get_bucket_notification_configuration(Bucket=config.primary_bucket)
-    resp.pop("ResponseMetadata", None)
-    return resp
-
-
 def _start_outage_simulation() -> dict[str, Any]:
     with _state_lock:
         if _runtime_state["outage_active"]:
-            return {"outage_active": True, "message": "Outage simulation already active."}
+            return {
+                "outage_active": True,
+                "active_primary_bucket": config.primary_bucket,
+                "active_primary_region": config.active_primary_region,
+                "active_backup_bucket": config.backup_bucket,
+                "active_backup_region": config.active_backup_region,
+                "message": "Outage simulation already active.",
+            }
 
-        saved_config = _get_bucket_notification_config()
-
-        s3 = _primary_s3()
-        s3.put_bucket_notification_configuration(
-            Bucket=config.primary_bucket,
-            NotificationConfiguration={},
-        )
-
-        _runtime_state["saved_notification_config"] = saved_config
+        # Promote the backup region in-memory. All callers that read
+        # config.primary_bucket / config.active_primary_region now resolve
+        # to the formerly-backup bucket, so subsequent uploads, listings,
+        # and syncs target the new primary automatically.
+        config.outage_active = True
         _runtime_state["outage_active"] = True
 
     return {
         "outage_active": True,
-        "message": "Outage simulation started. Lambda trigger disabled.",
+        "active_primary_bucket": config.primary_bucket,
+        "active_primary_region": config.active_primary_region,
+        "active_backup_bucket": config.backup_bucket,
+        "active_backup_region": config.active_backup_region,
+        "message": (
+            f"Outage simulation started. {config.primary_bucket} "
+            f"({config.active_primary_region}) is now the active primary."
+        ),
     }
 
 
 def _end_outage_simulation() -> dict[str, Any]:
     with _state_lock:
         if not _runtime_state["outage_active"]:
-            return {"outage_active": False, "message": "Outage simulation is not active."}
+            return {
+                "outage_active": False,
+                "active_primary_bucket": config.primary_bucket,
+                "active_primary_region": config.active_primary_region,
+                "active_backup_bucket": config.backup_bucket,
+                "active_backup_region": config.active_backup_region,
+                "message": "Outage simulation is not active.",
+            }
 
-        saved_config = _runtime_state.get("saved_notification_config", {})
-
-        s3 = _primary_s3()
-        s3.put_bucket_notification_configuration(
-            Bucket=config.primary_bucket,
-            NotificationConfiguration=saved_config,
-        )
-
-        _runtime_state["saved_notification_config"] = {}
+        config.outage_active = False
         _runtime_state["outage_active"] = False
 
     return {
         "outage_active": False,
-        "message": "Outage simulation ended. Lambda trigger restored.",
+        "active_primary_bucket": config.primary_bucket,
+        "active_primary_region": config.active_primary_region,
+        "active_backup_bucket": config.backup_bucket,
+        "active_backup_region": config.active_backup_region,
+        "message": (
+            f"Outage simulation ended. {config.primary_bucket} "
+            f"({config.active_primary_region}) restored as primary."
+        ),
     }
 
 
@@ -613,3 +623,68 @@ def action_seed() -> dict[str, Any]:
         }
     except ClientError as error:
         raise HTTPException(status_code=500, detail=error.response.get("Error", {}).get("Message", "Seed failed"))
+
+
+def _sanitize_prefix(prefix: str) -> str:
+    cleaned = (prefix or "").strip().strip("/")
+    # Disallow path traversal segments and backslashes.
+    parts = [p for p in cleaned.split("/") if p and p not in ("..", ".")]
+    return "/".join(parts)
+
+
+@app.post("/api/actions/upload-file")
+async def action_upload_file(
+    file: UploadFile = File(...),
+    prefix: str = Form(default="uploads"),
+) -> dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="A file is required.")
+
+    content = await file.read()
+    size = len(content)
+
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if size > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({human_size(size)}). Limit is {human_size(MAX_UPLOAD_BYTES)}.",
+        )
+
+    safe_name = os.path.basename(file.filename).replace("\\", "/").lstrip("/")
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    safe_prefix = _sanitize_prefix(prefix)
+    s3_key = f"{safe_prefix}/{safe_name}" if safe_prefix else safe_name
+
+    target_bucket = config.primary_bucket
+    target_region = config.active_primary_region
+    s3 = _s3(target_region)
+
+    try:
+        s3.put_object(
+            Bucket=target_bucket,
+            Key=s3_key,
+            Body=content,
+            ContentType=file.content_type or "application/octet-stream",
+            ServerSideEncryption="AES256",
+        )
+    except ClientError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=error.response.get("Error", {}).get("Message", "Upload failed"),
+        )
+
+    return {
+        "ok": True,
+        "result": {
+            "key": s3_key,
+            "size_bytes": size,
+            "size_hr": human_size(size),
+            "content_type": file.content_type or "application/octet-stream",
+            "bucket": target_bucket,
+            "region": target_region,
+            "outage_active": _runtime_state["outage_active"],
+        },
+    }
