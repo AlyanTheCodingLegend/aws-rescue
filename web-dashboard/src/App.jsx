@@ -508,7 +508,6 @@ function App() {
       } else if (actionKey === 'provision-infra') {
         response = await api.provision()
         showToast('Infrastructure provisioned successfully.', 'ok')
-        await refreshInfraStatus()
       }
 
       setActionResult({ action: actionKey, payload: response?.result ?? response })
@@ -555,19 +554,24 @@ function App() {
     }
   }
 
-  function exportVisibleLogs() {
-    const url = api.getLogsCsvUrl({
-      status: logFilter,
-      fromDate: logFromDate,
-      keyQuery: logQuery,
-      limit: 5000,
-    })
-
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `rescue_logs_${Date.now()}.csv`
-    anchor.click()
-    showToast('CSV download started.', 'neutral')
+  async function exportVisibleLogs() {
+    try {
+      const blob = await api.downloadLogsCsv({
+        status: logFilter,
+        fromDate: logFromDate,
+        keyQuery: logQuery,
+        limit: 5000,
+      })
+      const blobUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = blobUrl
+      anchor.download = `rescue_logs_${Date.now()}.csv`
+      anchor.click()
+      URL.revokeObjectURL(blobUrl)
+      showToast('CSV download started.', 'neutral')
+    } catch (e) {
+      showToast(e.message || 'CSV download failed.', 'warn')
+    }
   }
 
   const metrics = overviewData?.metrics || {
@@ -1192,8 +1196,8 @@ function ControlsSection({
       key: 'simulate-outage',
       title: outageMode ? 'End Outage Simulation' : 'Start Outage Simulation',
       description: outageMode
-        ? 'Restore S3 to Lambda trigger to resume replication.'
-        : 'Disable S3 to Lambda trigger so new uploads are not replicated.',
+        ? 'Restore original primary region as active. Uploads resume targeting the primary bucket.'
+        : 'Simulate primary region failure. Backend reroutes all traffic to the backup bucket as the active primary.',
       buttonLabel: outageMode ? 'End Outage' : 'Start Outage',
     },
     {

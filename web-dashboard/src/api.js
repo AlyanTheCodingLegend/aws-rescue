@@ -100,13 +100,16 @@ export const api = {
     return request(url.replace(API_BASE, ''))
   },
 
-  getLogsCsvUrl({ status = 'ALL', fromDate = '', keyQuery = '', limit = 1000 } = {}) {
-    return buildUrl('/logs.csv', {
-      status,
-      from_date: fromDate,
-      key_query: keyQuery,
-      limit,
+  async downloadLogsCsv({ status = 'ALL', fromDate = '', keyQuery = '', limit = 5000 } = {}) {
+    const params = new URLSearchParams({ status, limit: String(limit) })
+    if (fromDate) params.set('from_date', fromDate)
+    if (keyQuery) params.set('key_query', keyQuery)
+
+    const response = await fetch(`${API_BASE}/logs.csv?${params}`, {
+      headers: credHeaders(),
     })
+    if (!response.ok) throw new Error(`CSV download failed (${response.status})`)
+    return response.blob()
   },
 
   getOutageState() {
