@@ -31,14 +31,11 @@ function credHeaders() {
 }
 
 function buildUrl(path, params = {}) {
-  const url = new URL(`${API_BASE}${path}`, window.location.origin)
-  Object.entries(params).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === '') {
-      return
-    }
-    url.searchParams.set(key, String(value))
-  })
-  return `${url.pathname}${url.search}`
+  const query = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+    .join('&')
+  return query ? `${path}?${query}` : path
 }
 
 async function parseResponse(response) {
@@ -77,8 +74,7 @@ export const api = {
   },
 
   getObjects(search = '') {
-    const url = buildUrl('/objects', { search })
-    return request(url.replace(API_BASE, ''))
+    return request(buildUrl('/objects', { search }))
   },
 
   getObjectHistory(objectKey, limit = 20) {
@@ -86,18 +82,16 @@ export const api = {
       .split('/')
       .map((part) => encodeURIComponent(part))
       .join('/')
-    const url = buildUrl(`/objects/${encoded}/history`, { limit })
-    return request(url.replace(API_BASE, ''))
+    return request(buildUrl(`/objects/${encoded}/history`, { limit }))
   },
 
   getLogs({ status = 'ALL', fromDate = '', keyQuery = '', limit = 1000 } = {}) {
-    const url = buildUrl('/logs', {
+    return request(buildUrl('/logs', {
       status,
       from_date: fromDate,
       key_query: keyQuery,
       limit,
-    })
-    return request(url.replace(API_BASE, ''))
+    }))
   },
 
   async downloadLogsCsv({ status = 'ALL', fromDate = '', keyQuery = '', limit = 5000 } = {}) {
