@@ -50,7 +50,7 @@ def drift():
     status_label = "HEALTHY" if status_color == "green" else "DRIFT DETECTED"
 
     console.print()
-    console.rule(f"[{status_color} bold]Drift Report — {status_label}[/{status_color} bold]")
+    console.rule(f"[{status_color} bold]Drift Report | {status_label}[/{status_color} bold]")
     console.print(f"  Primary objects : [bold]{total}[/bold]")
     console.print(f"  Backup objects  : [bold]{len(backup_keys)}[/bold]")
     console.print(f"  In sync         : [green]{in_sync_count}[/green]")

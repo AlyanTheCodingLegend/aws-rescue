@@ -22,7 +22,7 @@ def _list_objects(s3, bucket: str) -> dict:
 @click.command()
 @click.option("--dry-run", is_flag=True, help="Report what would be synced without copying.")
 def sync(dry_run: bool):
-    """Force a full manual sync: primary → backup."""
+    """Force a full manual sync: primary -> backup."""
     s3_pri = primary_s3()
     s3_bak = backup_s3()
 
