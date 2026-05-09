@@ -562,8 +562,8 @@ def get_objects(
     creds: RequestCreds = Depends(get_creds),
 ) -> dict[str, Any]:
     try:
-        primary_objects, _, _ = _list_bucket(creds.eff_primary_bucket(), creds.eff_active_primary_region(), creds)
-        backup_objects, _, _ = _list_bucket(creds.eff_backup_bucket(), creds.eff_active_backup_region(), creds)
+        primary_objects, primary_healthy, _ = _list_bucket(creds.eff_primary_bucket(), creds.eff_active_primary_region(), creds)
+        backup_objects, backup_healthy, _ = _list_bucket(creds.eff_backup_bucket(), creds.eff_active_backup_region(), creds)
 
         backup_by_key = {obj["key"]: obj for obj in backup_objects}
         primary_by_key = {obj["key"]: obj for obj in primary_objects}
@@ -600,6 +600,8 @@ def get_objects(
         return {
             "primary": primary_view,
             "backup": backup_view,
+            "primary_healthy": primary_healthy,
+            "backup_healthy": backup_healthy,
             "summary": {
                 "primary_count": len(primary_view),
                 "backup_count": len(backup_view),
@@ -624,8 +626,11 @@ def get_object_history(
         )
         items = resp.get("Items", [])
     except Exception:
-        all_items = [_normalize_log_item(item) for item in _scan_logs(creds, 2000)]
-        items = [item for item in all_items if item.get("object_key") == object_key][:limit]
+        try:
+            all_items = [_normalize_log_item(item) for item in _scan_logs(creds, 2000)]
+            items = [item for item in all_items if item.get("object_key") == object_key][:limit]
+        except Exception:
+            items = []
 
     normalized = [_normalize_log_item(item) for item in items]
     normalized.sort(key=lambda x: x.get("timestamp", ""), reverse=True)

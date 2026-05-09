@@ -234,7 +234,7 @@ function App() {
   const [configData, setConfigData] = useState(null)
   const [overviewData, setOverviewData] = useState(null)
   const [infraStatus, setInfraStatus] = useState(null)
-  const [objectsData, setObjectsData] = useState({ primary: [], backup: [], summary: {} })
+  const [objectsData, setObjectsData] = useState({ primary: [], backup: [], summary: {}, primary_healthy: true, backup_healthy: true })
   const [logsData, setLogsData] = useState({ items: [], failed_details: [], count: 0 })
 
   const [selectedObjectKey, setSelectedObjectKey] = useState('')
@@ -607,7 +607,7 @@ function App() {
                 key={item.key}
                 type="button"
                 className={`nav-item ${selected ? 'selected' : ''}`}
-                onClick={() => setActiveView(item.key)}
+                onClick={() => { setActiveView(item.key); setError('') }}
               >
                 <Icon size={16} />
                 <span>{item.label}</span>
@@ -699,6 +699,8 @@ function App() {
             objectQuery={objectQuery}
             setObjectQuery={setObjectQuery}
             objectsData={objectsData}
+            primaryHealthy={objectsData.primary_healthy}
+            backupHealthy={objectsData.backup_healthy}
             selectedObject={selectedObject}
             selectedObjectKey={effectiveSelectedObjectKey}
             objectHistory={objectHistory}
@@ -893,6 +895,8 @@ function ObjectsSection({
   objectQuery,
   setObjectQuery,
   objectsData,
+  primaryHealthy,
+  backupHealthy,
   selectedObject,
   selectedObjectKey,
   objectHistory,
@@ -922,6 +926,9 @@ function ObjectsSection({
           <div className="object-column">
             <h4>
               Primary — {configData?.primary_bucket || 'primary'} ({objectsData.summary?.primary_count || 0})
+              {primaryHealthy === false && (
+                <span className="bucket-warn"><TriangleAlert size={13} /> Bucket unreachable</span>
+              )}
             </h4>
             <div className="table-wrap">
               <table>
@@ -933,24 +940,34 @@ function ObjectsSection({
                   </tr>
                 </thead>
                 <tbody>
-                  {objectsData.primary.map((item) => (
-                    <tr
-                      key={`p-${item.key}`}
-                      className={selectedObjectKey === item.key ? 'table-row-active' : ''}
-                      onClick={() => onSelectObject(item.key, 'primary')}
-                    >
-                      <td className="col-key" title={item.key}>
-                        {item.key}
-                      </td>
-                      <td className="col-size">{item.size_hr}</td>
-                      <td className="col-status">
-                        <StatusBadge
-                          status={item.in_backup ? 'IN_SYNC' : 'MISSING'}
-                          label={item.in_backup ? 'In Backup' : 'Missing'}
-                        />
+                  {objectsData.primary.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="empty-cell">
+                        {primaryHealthy === false
+                          ? 'Bucket unreachable — check credentials and region.'
+                          : 'Bucket is empty. Use Seed Test Data or upload a file.'}
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    objectsData.primary.map((item) => (
+                      <tr
+                        key={`p-${item.key}`}
+                        className={selectedObjectKey === item.key ? 'table-row-active' : ''}
+                        onClick={() => onSelectObject(item.key, 'primary')}
+                      >
+                        <td className="col-key" title={item.key}>
+                          {item.key}
+                        </td>
+                        <td className="col-size">{item.size_hr}</td>
+                        <td className="col-status">
+                          <StatusBadge
+                            status={item.in_backup ? 'IN_SYNC' : 'MISSING'}
+                            label={item.in_backup ? 'In Backup' : 'Missing'}
+                          />
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -959,6 +976,9 @@ function ObjectsSection({
           <div className="object-column">
             <h4>
               Backup — {configData?.backup_bucket || 'backup'} ({objectsData.summary?.backup_count || 0})
+              {backupHealthy === false && (
+                <span className="bucket-warn"><TriangleAlert size={13} /> Bucket unreachable</span>
+              )}
             </h4>
             <div className="table-wrap">
               <table>
@@ -970,24 +990,34 @@ function ObjectsSection({
                   </tr>
                 </thead>
                 <tbody>
-                  {objectsData.backup.map((item) => (
-                    <tr
-                      key={`b-${item.key}`}
-                      className={selectedObjectKey === item.key ? 'table-row-active' : ''}
-                      onClick={() => onSelectObject(item.key, 'backup')}
-                    >
-                      <td className="col-key" title={item.key}>
-                        {item.key}
-                      </td>
-                      <td className="col-size">{item.size_hr}</td>
-                      <td className="col-status">
-                        <StatusBadge
-                          status={item.matches_primary ? 'IN_SYNC' : 'MISMATCH'}
-                          label={item.matches_primary ? 'Matches Primary' : 'Mismatch/Orphan'}
-                        />
+                  {objectsData.backup.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="empty-cell">
+                        {backupHealthy === false
+                          ? 'Bucket unreachable — check credentials and region.'
+                          : 'Backup bucket is empty. Trigger a Full Sync to replicate objects.'}
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    objectsData.backup.map((item) => (
+                      <tr
+                        key={`b-${item.key}`}
+                        className={selectedObjectKey === item.key ? 'table-row-active' : ''}
+                        onClick={() => onSelectObject(item.key, 'backup')}
+                      >
+                        <td className="col-key" title={item.key}>
+                          {item.key}
+                        </td>
+                        <td className="col-size">{item.size_hr}</td>
+                        <td className="col-status">
+                          <StatusBadge
+                            status={item.matches_primary ? 'IN_SYNC' : 'MISMATCH'}
+                            label={item.matches_primary ? 'Matches Primary' : 'Mismatch/Orphan'}
+                          />
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
