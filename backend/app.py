@@ -6,13 +6,14 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -42,26 +43,96 @@ _runtime_state: dict[str, Any] = {
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB hard cap on user uploads
 
 
-def _s3(region: str):
-    return boto3.client("s3", region_name=region)
+# ---------------------------------------------------------------------------
+# Per-request credentials (from HTTP headers; never persisted server-side)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RequestCreds:
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    region: str = ""
+    project_id: str = ""
+
+    def _boto3_kwargs(self) -> dict:
+        if self.access_key_id and self.secret_access_key:
+            return {
+                "aws_access_key_id": self.access_key_id,
+                "aws_secret_access_key": self.secret_access_key,
+            }
+        return {}
+
+    def _primary_region(self) -> str:
+        return self.region or config.primary_region
+
+    def eff_project_id(self) -> str:
+        return self.project_id or config.project_id
+
+    def eff_active_primary_region(self) -> str:
+        p = self._primary_region()
+        return p if config._effective_original else config.backup_region
+
+    def eff_active_backup_region(self) -> str:
+        p = self._primary_region()
+        return config.backup_region if config._effective_original else p
+
+    def eff_dynamo_region(self) -> str:
+        return self.region or config.dynamo_region
+
+    def eff_lambda_region(self) -> str:
+        return self.region or config.lambda_region
+
+    def eff_primary_bucket(self) -> str:
+        pid = self.eff_project_id()
+        return f"rescue-primary-{pid}" if config._effective_original else f"rescue-backup-{pid}"
+
+    def eff_backup_bucket(self) -> str:
+        pid = self.eff_project_id()
+        return f"rescue-backup-{pid}" if config._effective_original else f"rescue-primary-{pid}"
 
 
-def _primary_s3():
-    return _s3(config.active_primary_region)
+def get_creds(
+    x_aws_access_key_id: str | None = Header(default=None),
+    x_aws_secret_access_key: str | None = Header(default=None),
+    x_aws_region: str | None = Header(default=None),
+    x_project_id: str | None = Header(default=None),
+) -> RequestCreds:
+    return RequestCreds(
+        access_key_id=x_aws_access_key_id or "",
+        secret_access_key=x_aws_secret_access_key or "",
+        region=x_aws_region or "",
+        project_id=x_project_id or "",
+    )
 
 
-def _backup_s3():
-    return _s3(config.active_backup_region)
+# ---------------------------------------------------------------------------
+# AWS client helpers
+# ---------------------------------------------------------------------------
+
+def _s3(region: str, creds: RequestCreds):
+    return boto3.client("s3", region_name=region, **creds._boto3_kwargs())
 
 
-def _lambda_client():
-    return boto3.client("lambda", region_name=config.lambda_region)
+def _primary_s3(creds: RequestCreds):
+    return _s3(creds.eff_active_primary_region(), creds)
 
 
-def _table():
-    dynamo = boto3.resource("dynamodb", region_name=config.dynamo_region)
+def _backup_s3(creds: RequestCreds):
+    return _s3(creds.eff_active_backup_region(), creds)
+
+
+def _lambda_client(creds: RequestCreds):
+    return boto3.client("lambda", region_name=creds.eff_lambda_region(), **creds._boto3_kwargs())
+
+
+def _table(creds: RequestCreds):
+    dynamo = boto3.resource("dynamodb", region_name=creds.eff_dynamo_region(), **creds._boto3_kwargs())
     return dynamo.Table(config.dynamo_table)
 
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
 
 def _parse_ts(ts: str | None) -> datetime | None:
     if not ts:
@@ -76,8 +147,8 @@ def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
-def _scan_logs(limit: int = 1000) -> list[dict[str, Any]]:
-    table = _table()
+def _scan_logs(creds: RequestCreds, limit: int = 1000) -> list[dict[str, Any]]:
+    table = _table(creds)
     items: list[dict[str, Any]] = []
     last_key = None
 
@@ -115,8 +186,8 @@ def _normalize_log_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _list_bucket(bucket: str, region: str) -> tuple[list[dict[str, Any]], bool, float | None]:
-    s3 = _s3(region)
+def _list_bucket(bucket: str, region: str, creds: RequestCreds) -> tuple[list[dict[str, Any]], bool, float | None]:
+    s3 = _s3(region, creds)
     objects: list[dict[str, Any]] = []
     healthy = True
     latency_ms: float | None = None
@@ -171,9 +242,12 @@ def _filter_logs(
     return filtered
 
 
-def _run_full_sync() -> dict[str, Any]:
-    s3_pri = _primary_s3()
-    s3_bak = _backup_s3()
+def _run_full_sync(creds: RequestCreds) -> dict[str, Any]:
+    s3_pri = _primary_s3(creds)
+    s3_bak = _backup_s3(creds)
+
+    primary_bucket = creds.eff_primary_bucket()
+    backup_bucket = creds.eff_backup_bucket()
 
     def _list_objects(s3_client, bucket: str) -> dict[str, tuple[str, int]]:
         objects: dict[str, tuple[str, int]] = {}
@@ -183,8 +257,8 @@ def _run_full_sync() -> dict[str, Any]:
                 objects[obj["Key"]] = (obj["ETag"].strip('"'), obj["Size"])
         return objects
 
-    primary_objects = _list_objects(s3_pri, config.primary_bucket)
-    backup_objects = _list_objects(s3_bak, config.backup_bucket)
+    primary_objects = _list_objects(s3_pri, primary_bucket)
+    backup_objects = _list_objects(s3_bak, backup_bucket)
 
     to_sync: list[tuple[str, int]] = []
     for key, (etag, size) in primary_objects.items():
@@ -198,8 +272,8 @@ def _run_full_sync() -> dict[str, Any]:
     for key, _size in to_sync:
         try:
             s3_bak.copy(
-                CopySource={"Bucket": config.primary_bucket, "Key": key},
-                Bucket=config.backup_bucket,
+                CopySource={"Bucket": primary_bucket, "Key": key},
+                Bucket=backup_bucket,
                 Key=key,
                 ExtraArgs={"ServerSideEncryption": "AES256"},
                 SourceClient=s3_pri,
@@ -223,8 +297,8 @@ def _run_full_sync() -> dict[str, Any]:
     }
 
 
-def _run_health_check() -> dict[str, Any]:
-    lambda_client = _lambda_client()
+def _run_health_check(creds: RequestCreds) -> dict[str, Any]:
+    lambda_client = _lambda_client(creds)
     resp = lambda_client.invoke(
         FunctionName=config.healthchecker_lambda_name,
         InvocationType="RequestResponse",
@@ -244,47 +318,43 @@ def _run_health_check() -> dict[str, Any]:
     }
 
 
-def _start_outage_simulation() -> dict[str, Any]:
+def _start_outage_simulation(creds: RequestCreds) -> dict[str, Any]:
     with _state_lock:
         if _runtime_state["outage_active"]:
             return {
                 "outage_active": True,
-                "active_primary_bucket": config.primary_bucket,
-                "active_primary_region": config.active_primary_region,
-                "active_backup_bucket": config.backup_bucket,
-                "active_backup_region": config.active_backup_region,
+                "active_primary_bucket": creds.eff_primary_bucket(),
+                "active_primary_region": creds.eff_active_primary_region(),
+                "active_backup_bucket": creds.eff_backup_bucket(),
+                "active_backup_region": creds.eff_active_backup_region(),
                 "message": "Outage simulation already active.",
             }
 
-        # Promote the backup region in-memory. All callers that read
-        # config.primary_bucket / config.active_primary_region now resolve
-        # to the formerly-backup bucket, so subsequent uploads, listings,
-        # and syncs target the new primary automatically.
         config.outage_active = True
         _runtime_state["outage_active"] = True
 
     return {
         "outage_active": True,
-        "active_primary_bucket": config.primary_bucket,
-        "active_primary_region": config.active_primary_region,
-        "active_backup_bucket": config.backup_bucket,
-        "active_backup_region": config.active_backup_region,
+        "active_primary_bucket": creds.eff_primary_bucket(),
+        "active_primary_region": creds.eff_active_primary_region(),
+        "active_backup_bucket": creds.eff_backup_bucket(),
+        "active_backup_region": creds.eff_active_backup_region(),
         "message": (
-            f"Outage simulation started. {config.primary_bucket} "
-            f"({config.active_primary_region}) is now the active primary."
+            f"Outage simulation started. {creds.eff_primary_bucket()} "
+            f"({creds.eff_active_primary_region()}) is now the active primary."
         ),
     }
 
 
-def _end_outage_simulation() -> dict[str, Any]:
+def _end_outage_simulation(creds: RequestCreds) -> dict[str, Any]:
     with _state_lock:
         if not _runtime_state["outage_active"]:
             return {
                 "outage_active": False,
-                "active_primary_bucket": config.primary_bucket,
-                "active_primary_region": config.active_primary_region,
-                "active_backup_bucket": config.backup_bucket,
-                "active_backup_region": config.active_backup_region,
+                "active_primary_bucket": creds.eff_primary_bucket(),
+                "active_primary_region": creds.eff_active_primary_region(),
+                "active_backup_bucket": creds.eff_backup_bucket(),
+                "active_backup_region": creds.eff_active_backup_region(),
                 "message": "Outage simulation is not active.",
             }
 
@@ -293,19 +363,19 @@ def _end_outage_simulation() -> dict[str, Any]:
 
     return {
         "outage_active": False,
-        "active_primary_bucket": config.primary_bucket,
-        "active_primary_region": config.active_primary_region,
-        "active_backup_bucket": config.backup_bucket,
-        "active_backup_region": config.active_backup_region,
+        "active_primary_bucket": creds.eff_primary_bucket(),
+        "active_primary_region": creds.eff_active_primary_region(),
+        "active_backup_bucket": creds.eff_backup_bucket(),
+        "active_backup_region": creds.eff_active_backup_region(),
         "message": (
-            f"Outage simulation ended. {config.primary_bucket} "
-            f"({config.active_primary_region}) restored as primary."
+            f"Outage simulation ended. {creds.eff_primary_bucket()} "
+            f"({creds.eff_active_primary_region()}) restored as primary."
         ),
     }
 
 
-def _run_seed() -> list[dict[str, Any]]:
-    s3 = _primary_s3()
+def _run_seed(creds: RequestCreds) -> list[dict[str, Any]]:
+    s3 = _primary_s3(creds)
     files = build_file_list()
 
     uploaded: list[dict[str, Any]] = []
@@ -314,7 +384,7 @@ def _run_seed() -> list[dict[str, Any]]:
         if len(content_bytes) > config.MAX_FILE_BYTES:
             content_bytes = content_bytes[: config.MAX_FILE_BYTES]
 
-        s3.put_object(Bucket=config.primary_bucket, Key=s3_key, Body=content_bytes)
+        s3.put_object(Bucket=creds.eff_primary_bucket(), Key=s3_key, Body=content_bytes)
         uploaded.append(
             {
                 "key": s3_key,
@@ -326,37 +396,43 @@ def _run_seed() -> list[dict[str, Any]]:
     return uploaded
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "timestamp": _iso_utc_now()}
 
 
 @app.get("/api/config")
-def get_config() -> dict[str, Any]:
+def get_config(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     return {
-        "project_id": config.project_id,
-        "primary_bucket": config.primary_bucket,
-        "backup_bucket": config.backup_bucket,
-        "active_primary_region": config.active_primary_region,
-        "active_backup_region": config.active_backup_region,
+        "project_id": creds.eff_project_id(),
+        "primary_bucket": creds.eff_primary_bucket(),
+        "backup_bucket": creds.eff_backup_bucket(),
+        "active_primary_region": creds.eff_active_primary_region(),
+        "active_backup_region": creds.eff_active_backup_region(),
         "dynamo_table": config.dynamo_table,
         "failover_state": "FAILED_OVER" if not config._primary_is_original else "NORMAL",
     }
 
 
 @app.get("/api/overview")
-def get_overview() -> dict[str, Any]:
+def get_overview(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     try:
         primary_objects, primary_ok, primary_latency = _list_bucket(
-            config.primary_bucket,
-            config.active_primary_region,
+            creds.eff_primary_bucket(),
+            creds.eff_active_primary_region(),
+            creds,
         )
         backup_objects, backup_ok, backup_latency = _list_bucket(
-            config.backup_bucket,
-            config.active_backup_region,
+            creds.eff_backup_bucket(),
+            creds.eff_active_backup_region(),
+            creds,
         )
 
-        logs = [_normalize_log_item(item) for item in _scan_logs(1000)]
+        logs = [_normalize_log_item(item) for item in _scan_logs(creds, 1000)]
 
         success_logs = [log for log in logs if log["status"] == "SUCCESS"]
         success_logs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
@@ -407,16 +483,16 @@ def get_overview() -> dict[str, Any]:
             },
             "regions": [
                 {
-                    "region": config.active_primary_region,
+                    "region": creds.eff_active_primary_region(),
                     "role": "Primary",
-                    "bucket": config.primary_bucket,
+                    "bucket": creds.eff_primary_bucket(),
                     "health": "Healthy" if primary_ok else "Unavailable",
                     "latency_ms": primary_latency,
                 },
                 {
-                    "region": config.active_backup_region,
+                    "region": creds.eff_active_backup_region(),
                     "role": "Backup",
-                    "bucket": config.backup_bucket,
+                    "bucket": creds.eff_backup_bucket(),
                     "health": "Healthy" if backup_ok else "Unavailable",
                     "latency_ms": backup_latency,
                 },
@@ -431,10 +507,13 @@ def get_overview() -> dict[str, Any]:
 
 
 @app.get("/api/objects")
-def get_objects(search: str = Query(default="")) -> dict[str, Any]:
+def get_objects(
+    search: str = Query(default=""),
+    creds: RequestCreds = Depends(get_creds),
+) -> dict[str, Any]:
     try:
-        primary_objects, _, _ = _list_bucket(config.primary_bucket, config.active_primary_region)
-        backup_objects, _, _ = _list_bucket(config.backup_bucket, config.active_backup_region)
+        primary_objects, _, _ = _list_bucket(creds.eff_primary_bucket(), creds.eff_active_primary_region(), creds)
+        backup_objects, _, _ = _list_bucket(creds.eff_backup_bucket(), creds.eff_active_backup_region(), creds)
 
         backup_by_key = {obj["key"]: obj for obj in backup_objects}
         primary_by_key = {obj["key"]: obj for obj in primary_objects}
@@ -484,8 +563,9 @@ def get_objects(search: str = Query(default="")) -> dict[str, Any]:
 def get_object_history(
     object_key: str,
     limit: int = Query(default=20, ge=1, le=100),
+    creds: RequestCreds = Depends(get_creds),
 ) -> dict[str, Any]:
-    table = _table()
+    table = _table(creds)
     try:
         resp = table.query(
             KeyConditionExpression=Key("object_key").eq(object_key),
@@ -494,8 +574,7 @@ def get_object_history(
         )
         items = resp.get("Items", [])
     except Exception:
-        # Fallback when query key schema is not available as expected.
-        all_items = [_normalize_log_item(item) for item in _scan_logs(2000)]
+        all_items = [_normalize_log_item(item) for item in _scan_logs(creds, 2000)]
         items = [item for item in all_items if item.get("object_key") == object_key][:limit]
 
     normalized = [_normalize_log_item(item) for item in items]
@@ -513,8 +592,9 @@ def get_logs(
     from_date: date | None = Query(default=None),
     key_query: str = Query(default=""),
     limit: int = Query(default=1000, ge=1, le=5000),
+    creds: RequestCreds = Depends(get_creds),
 ) -> dict[str, Any]:
-    logs = [_normalize_log_item(item) for item in _scan_logs(limit)]
+    logs = [_normalize_log_item(item) for item in _scan_logs(creds, limit)]
     filtered = _filter_logs(logs, status=status, from_date=from_date, key_query=key_query)
 
     failed_logs = [
@@ -540,8 +620,9 @@ def download_logs_csv(
     from_date: date | None = Query(default=None),
     key_query: str = Query(default=""),
     limit: int = Query(default=1000, ge=1, le=5000),
+    creds: RequestCreds = Depends(get_creds),
 ):
-    logs = [_normalize_log_item(item) for item in _scan_logs(limit)]
+    logs = [_normalize_log_item(item) for item in _scan_logs(creds, limit)]
     filtered = _filter_logs(logs, status=status, from_date=from_date, key_query=key_query)
 
     buf = io.StringIO()
@@ -575,45 +656,45 @@ def get_outage_state() -> dict[str, Any]:
 
 
 @app.post("/api/actions/full-sync")
-def action_full_sync() -> dict[str, Any]:
+def action_full_sync(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     try:
-        result = _run_full_sync()
+        result = _run_full_sync(creds)
         return {"ok": True, "result": result}
     except ClientError as error:
         raise HTTPException(status_code=500, detail=error.response.get("Error", {}).get("Message", "Sync failed"))
 
 
 @app.post("/api/actions/health-check")
-def action_health_check() -> dict[str, Any]:
+def action_health_check(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     try:
-        result = _run_health_check()
+        result = _run_health_check(creds)
         return {"ok": True, "result": result}
     except ClientError as error:
         raise HTTPException(status_code=500, detail=error.response.get("Error", {}).get("Message", "Health check failed"))
 
 
 @app.post("/api/actions/outage/start")
-def action_outage_start() -> dict[str, Any]:
+def action_outage_start(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     try:
-        result = _start_outage_simulation()
+        result = _start_outage_simulation(creds)
         return {"ok": True, "result": result}
     except ClientError as error:
         raise HTTPException(status_code=500, detail=error.response.get("Error", {}).get("Message", "Outage start failed"))
 
 
 @app.post("/api/actions/outage/end")
-def action_outage_end() -> dict[str, Any]:
+def action_outage_end(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     try:
-        result = _end_outage_simulation()
+        result = _end_outage_simulation(creds)
         return {"ok": True, "result": result}
     except ClientError as error:
         raise HTTPException(status_code=500, detail=error.response.get("Error", {}).get("Message", "Outage end failed"))
 
 
 @app.post("/api/actions/seed")
-def action_seed() -> dict[str, Any]:
+def action_seed(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
     try:
-        uploaded = _run_seed()
+        uploaded = _run_seed(creds)
         return {
             "ok": True,
             "result": {
@@ -627,7 +708,6 @@ def action_seed() -> dict[str, Any]:
 
 def _sanitize_prefix(prefix: str) -> str:
     cleaned = (prefix or "").strip().strip("/")
-    # Disallow path traversal segments and backslashes.
     parts = [p for p in cleaned.split("/") if p and p not in ("..", ".")]
     return "/".join(parts)
 
@@ -636,6 +716,7 @@ def _sanitize_prefix(prefix: str) -> str:
 async def action_upload_file(
     file: UploadFile = File(...),
     prefix: str = Form(default="uploads"),
+    creds: RequestCreds = Depends(get_creds),
 ) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="A file is required.")
@@ -658,9 +739,9 @@ async def action_upload_file(
     safe_prefix = _sanitize_prefix(prefix)
     s3_key = f"{safe_prefix}/{safe_name}" if safe_prefix else safe_name
 
-    target_bucket = config.primary_bucket
-    target_region = config.active_primary_region
-    s3 = _s3(target_region)
+    target_bucket = creds.eff_primary_bucket()
+    target_region = creds.eff_active_primary_region()
+    s3 = _s3(target_region, creds)
 
     try:
         s3.put_object(

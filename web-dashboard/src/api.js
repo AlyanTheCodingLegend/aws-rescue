@@ -1,5 +1,35 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api'
 
+const CREDS_KEY = 'aws_rescue_creds'
+
+export function getStoredCreds() {
+  try {
+    const raw = localStorage.getItem(CREDS_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+export function saveStoredCreds(creds) {
+  localStorage.setItem(CREDS_KEY, JSON.stringify(creds))
+}
+
+export function clearStoredCreds() {
+  localStorage.removeItem(CREDS_KEY)
+}
+
+function credHeaders() {
+  const creds = getStoredCreds()
+  if (!creds) return {}
+  return {
+    'X-AWS-Access-Key-Id': creds.accessKeyId || '',
+    'X-AWS-Secret-Access-Key': creds.secretAccessKey || '',
+    'X-AWS-Region': creds.region || '',
+    'X-Project-Id': creds.projectId || '',
+  }
+}
+
 function buildUrl(path, params = {}) {
   const url = new URL(`${API_BASE}${path}`, window.location.origin)
   Object.entries(params).forEach(([key, value]) => {
@@ -23,6 +53,7 @@ async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      ...credHeaders(),
       ...(options.headers || {}),
     },
     ...options,
@@ -109,6 +140,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE}/actions/upload-file`, {
       method: 'POST',
+      headers: credHeaders(),
       body: formData,
     })
 

@@ -7,12 +7,16 @@ import {
   Cloud,
   Database,
   Download,
+  Eye,
+  EyeOff,
+  KeyRound,
   LayoutDashboard,
   Boxes,
   RefreshCw,
   ScrollText,
   Search,
   Server,
+  Settings,
   SlidersHorizontal,
   Sparkles,
   TriangleAlert,
@@ -31,7 +35,7 @@ import {
   YAxis,
 } from 'recharts'
 import './App.css'
-import { api } from './api'
+import { api, getStoredCreds, saveStoredCreds, clearStoredCreds } from './api'
 
 const NAV_ITEMS = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -90,6 +94,137 @@ function hourLabel(ts) {
   return parsed.toISOString().slice(11, 16)
 }
 
+function CredentialsModal({ onSave, onClose, canClose }) {
+  const existing = getStoredCreds()
+  const [form, setForm] = useState({
+    accessKeyId: existing?.accessKeyId || '',
+    secretAccessKey: existing?.secretAccessKey || '',
+    region: existing?.region || 'us-east-1',
+    projectId: existing?.projectId || '',
+  })
+  const [showSecret, setShowSecret] = useState(false)
+  const [formError, setFormError] = useState('')
+
+  function handleChange(field) {
+    return (e) => setForm((prev) => ({ ...prev, [field]: e.target.value }))
+  }
+
+  function handleSave() {
+    if (!form.accessKeyId.trim()) { setFormError('AWS Access Key ID is required.'); return }
+    if (!form.secretAccessKey.trim()) { setFormError('AWS Secret Access Key is required.'); return }
+    if (!form.region.trim()) { setFormError('AWS Default Region is required.'); return }
+    if (!form.projectId.trim()) { setFormError('Project ID is required.'); return }
+    setFormError('')
+    saveStoredCreds({
+      accessKeyId: form.accessKeyId.trim(),
+      secretAccessKey: form.secretAccessKey.trim(),
+      region: form.region.trim(),
+      projectId: form.projectId.trim(),
+    })
+    onSave()
+  }
+
+  function handleClear() {
+    clearStoredCreds()
+    setForm({ accessKeyId: '', secretAccessKey: '', region: 'us-east-1', projectId: '' })
+    setFormError('')
+  }
+
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="cred-modal-title">
+      <div className="modal-box">
+        <div className="modal-head">
+          <div className="modal-icon">
+            <KeyRound size={20} />
+          </div>
+          <div>
+            <h2 id="cred-modal-title">AWS Credentials</h2>
+            <p>Stored only in your browser — never sent to or saved by the server.</p>
+          </div>
+        </div>
+
+        <div className="modal-fields">
+          <label className="modal-field">
+            <span>AWS Access Key ID</span>
+            <input
+              type="text"
+              value={form.accessKeyId}
+              onChange={handleChange('accessKeyId')}
+              placeholder="AKIAIOSFODNN7EXAMPLE"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+
+          <label className="modal-field">
+            <span>AWS Secret Access Key</span>
+            <div className="secret-input-wrap">
+              <input
+                type={showSecret ? 'text' : 'password'}
+                value={form.secretAccessKey}
+                onChange={handleChange('secretAccessKey')}
+                placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                className="secret-toggle"
+                onClick={() => setShowSecret((v) => !v)}
+                aria-label={showSecret ? 'Hide secret key' : 'Show secret key'}
+              >
+                {showSecret ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+          </label>
+
+          <label className="modal-field">
+            <span>AWS Default Region</span>
+            <input
+              type="text"
+              value={form.region}
+              onChange={handleChange('region')}
+              placeholder="us-east-1"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+
+          <label className="modal-field">
+            <span>Project ID</span>
+            <input
+              type="text"
+              value={form.projectId}
+              onChange={handleChange('projectId')}
+              placeholder="aws-rescue-your-project"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+        </div>
+
+        {formError && <p className="modal-error">{formError}</p>}
+
+        <div className="modal-actions">
+          <button type="button" className="modal-btn-primary" onClick={handleSave}>
+            Save &amp; Connect
+          </button>
+          {canClose && (
+            <button type="button" className="modal-btn-ghost" onClick={onClose}>
+              Cancel
+            </button>
+          )}
+          {existing && (
+            <button type="button" className="modal-btn-danger" onClick={handleClear}>
+              Clear Saved
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [activeView, setActiveView] = useState('overview')
   const [toast, setToast] = useState(null)
@@ -117,6 +252,8 @@ function App() {
   const [uploadFileChoice, setUploadFileChoice] = useState(null)
   const [uploadingFile, setUploadingFile] = useState(false)
   const [uploadInputKey, setUploadInputKey] = useState(0)
+
+  const [showCredModal, setShowCredModal] = useState(() => !getStoredCreds())
 
   function showToast(text, tone = 'neutral') {
     setToast({ id: Date.now(), text, tone })
@@ -164,6 +301,8 @@ function App() {
   }
 
   useEffect(() => {
+    if (showCredModal) return undefined
+
     let mounted = true
 
     const load = async () => {
@@ -189,7 +328,7 @@ function App() {
       mounted = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [showCredModal])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -471,6 +610,15 @@ function App() {
             {outageMode ? <TriangleAlert size={14} /> : <CheckCircle2 size={14} />}
             <span>{outageMode ? 'Outage Simulation On' : 'Normal Mode'}</span>
           </div>
+          <button
+            type="button"
+            className="nav-item configure-btn"
+            onClick={() => setShowCredModal(true)}
+            title="Configure AWS credentials"
+          >
+            <Settings size={16} />
+            <span>Configure AWS</span>
+          </button>
         </div>
       </aside>
 
@@ -574,6 +722,17 @@ function App() {
           />
         )}
       </main>
+
+      {showCredModal && (
+        <CredentialsModal
+          canClose={Boolean(getStoredCreds())}
+          onSave={() => {
+            setShowCredModal(false)
+            showToast('Credentials saved. Loading dashboard…', 'ok')
+          }}
+          onClose={() => setShowCredModal(false)}
+        />
+      )}
     </div>
   )
 }
