@@ -133,6 +133,14 @@ export const api = {
     return request('/actions/seed', { method: 'POST' })
   },
 
+  getInfraStatus() {
+    return request('/infra-status')
+  },
+
+  provision() {
+    return request('/actions/provision', { method: 'POST' })
+  },
+
   async uploadFile(file, prefix = 'uploads') {
     const formData = new FormData()
     formData.append('file', file)

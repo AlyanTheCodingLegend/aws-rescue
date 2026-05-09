@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cli.commands.seed import build_file_list
 from cli.utils import human_size
 from infra.config import config
+from infra.provision import provision as _run_provision
 
 
 app = FastAPI(title="AWS-RESCUE API", version="0.1.0")
@@ -152,20 +153,69 @@ def _scan_logs(creds: RequestCreds, limit: int = 1000) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     last_key = None
 
-    while len(items) < limit:
-        chunk = min(200, limit - len(items))
-        kwargs: dict[str, Any] = {"Limit": chunk}
-        if last_key:
-            kwargs["ExclusiveStartKey"] = last_key
+    try:
+        while len(items) < limit:
+            chunk = min(200, limit - len(items))
+            kwargs: dict[str, Any] = {"Limit": chunk}
+            if last_key:
+                kwargs["ExclusiveStartKey"] = last_key
 
-        resp = table.scan(**kwargs)
-        items.extend(resp.get("Items", []))
-        last_key = resp.get("LastEvaluatedKey")
+            resp = table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
 
-        if not last_key:
-            break
+            if not last_key:
+                break
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("ResourceNotFoundException", "ResourceInUseException"):
+            return []
+        raise
 
     return items
+
+
+def _check_infra_status(creds: RequestCreds) -> dict[str, Any]:
+    bkw = creds._boto3_kwargs()
+
+    def _bucket_exists(bucket: str, region: str) -> bool:
+        try:
+            boto3.client("s3", region_name=region, **bkw).head_bucket(Bucket=bucket)
+            return True
+        except ClientError:
+            return False
+
+    def _table_exists() -> bool:
+        try:
+            boto3.client("dynamodb", region_name=creds.eff_dynamo_region(), **bkw).describe_table(
+                TableName=config.dynamo_table
+            )
+            return True
+        except ClientError:
+            return False
+
+    def _lambda_exists(name: str) -> bool:
+        try:
+            boto3.client("lambda", region_name=creds.eff_lambda_region(), **bkw).get_function(
+                FunctionName=name
+            )
+            return True
+        except ClientError:
+            return False
+
+    pb_ok = _bucket_exists(creds.eff_primary_bucket(), config.primary_region)
+    bb_ok = _bucket_exists(creds.eff_backup_bucket(), config.backup_region)
+    db_ok = _table_exists()
+    rep_ok = _lambda_exists(config.replicator_lambda_name)
+    hc_ok = _lambda_exists(config.healthchecker_lambda_name)
+
+    return {
+        "primary_bucket": {"name": creds.eff_primary_bucket(), "exists": pb_ok},
+        "backup_bucket": {"name": creds.eff_backup_bucket(), "exists": bb_ok},
+        "dynamo_table": {"name": config.dynamo_table, "exists": db_ok},
+        "replicator_lambda": {"name": config.replicator_lambda_name, "exists": rep_ok},
+        "healthchecker_lambda": {"name": config.healthchecker_lambda_name, "exists": hc_ok},
+        "all_ok": all([pb_ok, bb_ok, db_ok, rep_ok, hc_ok]),
+    }
 
 
 def _normalize_log_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -704,6 +754,23 @@ def action_seed(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
         }
     except ClientError as error:
         raise HTTPException(status_code=500, detail=error.response.get("Error", {}).get("Message", "Seed failed"))
+
+
+@app.get("/api/infra-status")
+def get_infra_status(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
+    return _check_infra_status(creds)
+
+
+@app.post("/api/actions/provision")
+def action_provision(creds: RequestCreds = Depends(get_creds)) -> dict[str, Any]:
+    try:
+        result = _run_provision(bkw=creds._boto3_kwargs(), pid=creds.eff_project_id())
+        return {"ok": True, "result": result}
+    except ClientError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=error.response.get("Error", {}).get("Message", "Provisioning failed"),
+        )
 
 
 def _sanitize_prefix(prefix: str) -> str:

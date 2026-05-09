@@ -20,6 +20,14 @@ def _tags_list():
     return [{"Key": k, "Value": v} for k, v in config.tags.items()]
 
 
+def _pbucket(pid: str | None) -> str:
+    return f"rescue-primary-{pid or config.project_id}"
+
+
+def _bbucket(pid: str | None) -> str:
+    return f"rescue-backup-{pid or config.project_id}"
+
+
 # ---------------------------------------------------------------------------
 # S3
 # ---------------------------------------------------------------------------
@@ -40,7 +48,6 @@ def create_bucket(s3, bucket_name: str, region: str):
         else:
             raise
 
-    # Block public access
     s3.put_public_access_block(
         Bucket=bucket_name,
         PublicAccessBlockConfiguration={
@@ -50,44 +57,38 @@ def create_bucket(s3, bucket_name: str, region: str):
             "RestrictPublicBuckets": True,
         },
     )
-
-    # Enable versioning
     s3.put_bucket_versioning(
         Bucket=bucket_name,
         VersioningConfiguration={"Status": "Enabled"},
     )
-
-    # Server-side encryption (AES-256)
     s3.put_bucket_encryption(
         Bucket=bucket_name,
         ServerSideEncryptionConfiguration={
             "Rules": [
-                {
-                    "ApplyServerSideEncryptionByDefault": {
-                        "SSEAlgorithm": "AES256"
-                    }
-                }
+                {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
             ]
         },
     )
-
-    # Tag bucket
     s3.put_bucket_tagging(
         Bucket=bucket_name,
         Tagging={"TagSet": _tags_list()},
     )
 
 
-def provision_buckets():
+def provision_buckets(bkw: dict | None = None, pid: str | None = None):
+    bkw = bkw or {}
     print("\n[1/5] Provisioning S3 buckets...")
-    primary_s3 = boto3.client("s3", region_name=config.primary_region)
-    backup_s3 = boto3.client("s3", region_name=config.backup_region)
+    primary_s3 = boto3.client("s3", region_name=config.primary_region, **bkw)
+    backup_s3 = boto3.client("s3", region_name=config.backup_region, **bkw)
 
-    create_bucket(primary_s3, config.primary_bucket, config.primary_region)
-    create_bucket(backup_s3, config.backup_bucket, config.backup_region)
+    pb = _pbucket(pid)
+    bb = _bbucket(pid)
 
-    primary_arn = f"arn:aws:s3:::{config.primary_bucket}"
-    backup_arn = f"arn:aws:s3:::{config.backup_bucket}"
+    create_bucket(primary_s3, pb, config.primary_region)
+    create_bucket(backup_s3, bb, config.backup_region)
+
+    primary_arn = f"arn:aws:s3:::{pb}"
+    backup_arn = f"arn:aws:s3:::{bb}"
     print(f"  Primary ARN : {primary_arn}")
     print(f"  Backup ARN  : {backup_arn}")
     return primary_arn, backup_arn
@@ -97,9 +98,10 @@ def provision_buckets():
 # DynamoDB
 # ---------------------------------------------------------------------------
 
-def provision_dynamodb():
+def provision_dynamodb(bkw: dict | None = None):
+    bkw = bkw or {}
     print("\n[2/5] Provisioning DynamoDB table...")
-    dynamo = boto3.client("dynamodb", region_name=config.dynamo_region)
+    dynamo = boto3.client("dynamodb", region_name=config.dynamo_region, **bkw)
 
     try:
         dynamo.create_table(
@@ -115,7 +117,6 @@ def provision_dynamodb():
             BillingMode="PAY_PER_REQUEST",
             Tags=_tags_list(),
         )
-        # Wait for table to be active
         waiter = dynamo.get_waiter("table_exists")
         waiter.wait(TableName=config.dynamo_table)
         print(f"  [+] Created DynamoDB table: {config.dynamo_table}")
@@ -125,7 +126,6 @@ def provision_dynamodb():
         else:
             raise
 
-    # Enable TTL on expiry_ttl attribute
     try:
         dynamo.update_time_to_live(
             TableName=config.dynamo_table,
@@ -133,7 +133,6 @@ def provision_dynamodb():
         )
         print("  [+] TTL enabled on expiry_ttl attribute")
     except ClientError as e:
-        # TTL might already be enabled
         print(f"  [~] TTL update: {e.response['Error']['Message']}")
 
     table_arn = dynamo.describe_table(TableName=config.dynamo_table)["Table"]["TableArn"]
@@ -145,9 +144,15 @@ def provision_dynamodb():
 # IAM Role
 # ---------------------------------------------------------------------------
 
-def provision_iam_role(primary_bucket_arn: str, backup_bucket_arn: str, table_arn: str):
+def provision_iam_role(
+    primary_bucket_arn: str,
+    backup_bucket_arn: str,
+    table_arn: str,
+    bkw: dict | None = None,
+):
+    bkw = bkw or {}
     print("\n[3/5] Provisioning IAM role...")
-    iam = boto3.client("iam")
+    iam = boto3.client("iam", **bkw)
 
     trust_policy = json.dumps({
         "Version": "2012-10-17",
@@ -222,17 +227,18 @@ def _zip_handler(handler_path: str) -> bytes:
     return buf.getvalue()
 
 
-def _get_account_id() -> str:
-    return boto3.client("sts").get_caller_identity()["Account"]
+def _get_account_id(bkw: dict | None = None) -> str:
+    return boto3.client("sts", **bkw or {}).get_caller_identity()["Account"]
 
 
 # ---------------------------------------------------------------------------
 # Lambda: Replicator
 # ---------------------------------------------------------------------------
 
-def provision_replicator(role_arn: str):
+def provision_replicator(role_arn: str, bkw: dict | None = None, pid: str | None = None):
+    bkw = bkw or {}
     print("\n[4/5] Provisioning Lambda functions...")
-    lam = boto3.client("lambda", region_name=config.lambda_region)
+    lam = boto3.client("lambda", region_name=config.lambda_region, **bkw)
 
     handler_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -241,7 +247,7 @@ def provision_replicator(role_arn: str):
     zip_bytes = _zip_handler(handler_path)
 
     env_vars = {
-        "DEST_BUCKET": config.backup_bucket,
+        "DEST_BUCKET": _bbucket(pid),
         "DEST_REGION": config.backup_region,
         "SOURCE_REGION": config.primary_region,
         "DYNAMO_TABLE": config.dynamo_table,
@@ -279,19 +285,17 @@ def provision_replicator(role_arn: str):
         else:
             raise
 
-    # Wait for function to be active
     waiter = lam.get_waiter("function_active")
     waiter.wait(FunctionName=config.replicator_lambda_name)
 
-    # Add permission for S3 to invoke this Lambda
-    account_id = _get_account_id()
+    account_id = _get_account_id(bkw)
     try:
         lam.add_permission(
             FunctionName=config.replicator_lambda_name,
             StatementId="s3-invoke-replicator",
             Action="lambda:InvokeFunction",
             Principal="s3.amazonaws.com",
-            SourceArn=f"arn:aws:s3:::{config.primary_bucket}",
+            SourceArn=f"arn:aws:s3:::{_pbucket(pid)}",
             SourceAccount=account_id,
         )
         print("  [+] S3 invoke permission added to replicator")
@@ -309,9 +313,10 @@ def provision_replicator(role_arn: str):
 # Lambda: HealthChecker
 # ---------------------------------------------------------------------------
 
-def provision_healthchecker(role_arn: str):
-    lam = boto3.client("lambda", region_name=config.lambda_region)
-    events = boto3.client("events", region_name=config.lambda_region)
+def provision_healthchecker(role_arn: str, bkw: dict | None = None, pid: str | None = None):
+    bkw = bkw or {}
+    lam = boto3.client("lambda", region_name=config.lambda_region, **bkw)
+    events = boto3.client("events", region_name=config.lambda_region, **bkw)
 
     handler_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -320,8 +325,8 @@ def provision_healthchecker(role_arn: str):
     zip_bytes = _zip_handler(handler_path)
 
     env_vars = {
-        "PRIMARY_BUCKET": config.primary_bucket,
-        "BACKUP_BUCKET": config.backup_bucket,
+        "PRIMARY_BUCKET": _pbucket(pid),
+        "BACKUP_BUCKET": _bbucket(pid),
         "PRIMARY_REGION": config.primary_region,
         "BACKUP_REGION": config.backup_region,
         "DYNAMO_TABLE": config.dynamo_table,
@@ -362,7 +367,6 @@ def provision_healthchecker(role_arn: str):
     waiter = lam.get_waiter("function_active")
     waiter.wait(FunctionName=config.healthchecker_lambda_name)
 
-    # CloudWatch Events rule (schedule)
     try:
         rule_resp = events.put_rule(
             Name=config.cloudwatch_rule_name,
@@ -372,16 +376,15 @@ def provision_healthchecker(role_arn: str):
         )
         rule_arn = rule_resp["RuleArn"]
         print(f"  [+] CloudWatch Events rule: {config.cloudwatch_rule_name}")
-    except ClientError as e:
+    except ClientError:
         rule_arn = events.describe_rule(Name=config.cloudwatch_rule_name)["Arn"]
-        print(f"  [~] CloudWatch Events rule already exists")
+        print("  [~] CloudWatch Events rule already exists")
 
     events.put_targets(
         Rule=config.cloudwatch_rule_name,
         Targets=[{"Id": "healthchecker-target", "Arn": hc_arn}],
     )
 
-    # Permission for CloudWatch Events to invoke Lambda
     try:
         lam.add_permission(
             FunctionName=config.healthchecker_lambda_name,
@@ -405,12 +408,18 @@ def provision_healthchecker(role_arn: str):
 # S3 event notification (wires primary bucket -> replicator lambda)
 # ---------------------------------------------------------------------------
 
-def provision_s3_notification(replicator_arn: str):
+def provision_s3_notification(
+    replicator_arn: str,
+    bkw: dict | None = None,
+    pid: str | None = None,
+):
+    bkw = bkw or {}
     print("\n[5/5] Wiring S3 event notifications...")
-    s3 = boto3.client("s3", region_name=config.primary_region)
+    s3 = boto3.client("s3", region_name=config.primary_region, **bkw)
+    pb = _pbucket(pid)
 
     s3.put_bucket_notification_configuration(
-        Bucket=config.primary_bucket,
+        Bucket=pb,
         NotificationConfiguration={
             "LambdaFunctionConfigurations": [
                 {
@@ -420,32 +429,33 @@ def provision_s3_notification(replicator_arn: str):
             ]
         },
     )
-    print(f"  [+] S3 event notification set: {config.primary_bucket} -> {config.replicator_lambda_name}")
+    print(f"  [+] S3 event notification set: {pb} -> {config.replicator_lambda_name}")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def provision():
+def provision(bkw: dict | None = None, pid: str | None = None):
+    bkw = bkw or {}
     print("=" * 60)
     print("AWS-RESCUE: Infrastructure Provisioning")
     print("=" * 60)
-    print(f"Project ID    : {config.project_id}")
-    print(f"Primary Region: {config.primary_region}  Bucket: {config.primary_bucket}")
-    print(f"Backup Region : {config.backup_region}  Bucket: {config.backup_bucket}")
+    print(f"Project ID    : {pid or config.project_id}")
+    print(f"Primary Region: {config.primary_region}  Bucket: {_pbucket(pid)}")
+    print(f"Backup Region : {config.backup_region}  Bucket: {_bbucket(pid)}")
     print(f"DynamoDB      : {config.dynamo_table} ({config.dynamo_region})")
 
-    primary_arn, backup_arn = provision_buckets()
-    table_arn = provision_dynamodb()
+    primary_arn, backup_arn = provision_buckets(bkw=bkw, pid=pid)
+    table_arn = provision_dynamodb(bkw=bkw)
 
     print("\n[3/5] Provisioning IAM role (waiting 10s after creation for propagation)...")
-    role_arn = provision_iam_role(primary_arn, backup_arn, table_arn)
+    role_arn = provision_iam_role(primary_arn, backup_arn, table_arn, bkw=bkw)
     time.sleep(10)
 
-    replicator_arn = provision_replicator(role_arn)
-    hc_arn = provision_healthchecker(role_arn)
-    provision_s3_notification(replicator_arn)
+    replicator_arn = provision_replicator(role_arn, bkw=bkw, pid=pid)
+    hc_arn = provision_healthchecker(role_arn, bkw=bkw, pid=pid)
+    provision_s3_notification(replicator_arn, bkw=bkw, pid=pid)
 
     print("\n" + "=" * 60)
     print("Provisioning complete. Resource summary:")
@@ -456,7 +466,15 @@ def provision():
     print(f"  Replicator λ  : {replicator_arn}")
     print(f"  HealthChecker λ: {hc_arn}")
     print("=" * 60)
-    print("\nNOTE: Upload a file to the primary bucket to test replication.")
+
+    return {
+        "primary_bucket": primary_arn,
+        "backup_bucket": backup_arn,
+        "dynamo_table": table_arn,
+        "iam_role": role_arn,
+        "replicator_lambda": replicator_arn,
+        "healthchecker_lambda": hc_arn,
+    }
 
 
 if __name__ == "__main__":

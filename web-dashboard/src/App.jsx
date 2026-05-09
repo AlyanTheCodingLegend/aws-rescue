@@ -233,6 +233,7 @@ function App() {
 
   const [configData, setConfigData] = useState(null)
   const [overviewData, setOverviewData] = useState(null)
+  const [infraStatus, setInfraStatus] = useState(null)
   const [objectsData, setObjectsData] = useState({ primary: [], backup: [], summary: {} })
   const [logsData, setLogsData] = useState({ items: [], failed_details: [], count: 0 })
 
@@ -290,6 +291,11 @@ function App() {
     setOutageMode(Boolean(state.outage_active))
   }
 
+  async function refreshInfraStatus() {
+    const status = await api.getInfraStatus()
+    setInfraStatus(status)
+  }
+
   async function refreshAll() {
     await Promise.all([
       refreshConfig(),
@@ -297,6 +303,7 @@ function App() {
       refreshObjects(),
       refreshLogs(),
       refreshOutageState(),
+      refreshInfraStatus(),
     ])
   }
 
@@ -498,6 +505,10 @@ function App() {
       } else if (actionKey === 'simulate-outage') {
         response = outageMode ? await api.endOutage() : await api.startOutage()
         showToast(response?.result?.message || 'Outage state updated.', outageMode ? 'ok' : 'warn')
+      } else if (actionKey === 'provision-infra') {
+        response = await api.provision()
+        showToast('Infrastructure provisioned successfully.', 'ok')
+        await refreshInfraStatus()
       }
 
       setActionResult({ action: actionKey, payload: response?.result ?? response })
@@ -719,6 +730,7 @@ function App() {
             uploadingFile={uploadingFile}
             runUploadFile={runUploadFile}
             uploadInputKey={uploadInputKey}
+            infraStatus={infraStatus}
           />
         )}
       </main>
@@ -1161,6 +1173,7 @@ function ControlsSection({
   uploadingFile,
   runUploadFile,
   uploadInputKey,
+  infraStatus,
 }) {
   const actionCards = [
     {
@@ -1284,6 +1297,51 @@ function ControlsSection({
           <pre className="data-pre">{JSON.stringify(actionResult, null, 2)}</pre>
         ) : (
           <div className="empty-state">Run any control action to view detailed result payload.</div>
+        )}
+
+        {infraStatus && (
+          <>
+            <div className="card-head" style={{ marginTop: '18px' }}>
+              <h4>Infrastructure Status</h4>
+              <span>AWS resources for this project</span>
+            </div>
+            <div className="infra-status-grid">
+              {[
+                { label: 'Primary Bucket', info: infraStatus.primary_bucket },
+                { label: 'Backup Bucket', info: infraStatus.backup_bucket },
+                { label: 'DynamoDB Table', info: infraStatus.dynamo_table },
+                { label: 'Replicator Lambda', info: infraStatus.replicator_lambda },
+                { label: 'HealthChecker Lambda', info: infraStatus.healthchecker_lambda },
+              ].map(({ label, info }) => (
+                <div key={label} className={`infra-row ${info.exists ? 'ok' : 'danger'}`}>
+                  {info.exists ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                  <span className="infra-label">{label}</span>
+                  <code className="infra-name">{info.name}</code>
+                </div>
+              ))}
+            </div>
+
+            {!infraStatus.all_ok && (
+              <article className="control-card provision-card" style={{ marginTop: '14px' }}>
+                <h4>Provision Infrastructure</h4>
+                <p>
+                  One or more AWS resources are missing. Click below to create all required
+                  S3 buckets, DynamoDB table, IAM role, and Lambda functions.
+                  This takes ~60 seconds.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => runControlAction('provision-infra')}
+                  disabled={Boolean(runningActionKey)}
+                  className="provision-btn"
+                >
+                  {runningActionKey === 'provision-infra'
+                    ? <><RefreshCw className="spin" size={15} /> Provisioning…</>
+                    : <><Sparkles size={15} /> Provision Infrastructure</>}
+                </button>
+              </article>
+            )}
+          </>
         )}
       </div>
     </section>
